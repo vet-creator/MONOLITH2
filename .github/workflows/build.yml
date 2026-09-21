@@ -1,0 +1,64 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Primary target: the Windows CTF binary. Builds with MSVC, runs the full
+  # correctness gate + end-to-end test, and publishes monolith.exe.
+  # ---------------------------------------------------------------------------
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Optional: set your own secret flag (exactly 32 chars) as repo secret
+      # MONO_FLAG_INNER. Falls back to the public demo flag when unset. The
+      # generator runs at BUILD time, so this must be forwarded to both steps.
+      - name: Configure
+        env:
+          MONO_FLAG_INNER: ${{ secrets.MONO_FLAG_INNER }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        env:
+          MONO_FLAG_INNER: ${{ secrets.MONO_FLAG_INNER }}
+        run: cmake --build build --config Release --parallel
+
+      # This genuinely runs Pollard's rho against the real discrete-log
+      # instance -- expect this step alone to take up to ~2 minutes here
+      # (MSVC has no native 128-bit multiply, so the solver falls back to a
+      # fully portable path). The Linux job below gets a native 128-bit
+      # multiply and finishes in seconds instead.
+      - name: Test (self-test + end-to-end)
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item build/Release/monolith.exe dist/monolith.exe
+
+      - name: Upload challenge binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: monolith-windows-x64
+          path: dist/monolith.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Portability + verification on Linux (same core, no OS-specific code paths).
+  # ---------------------------------------------------------------------------
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
